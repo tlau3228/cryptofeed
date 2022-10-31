@@ -9,17 +9,18 @@ import hmac
 import logging
 from decimal import Decimal
 from time import time
-from typing import Dict, List, Tuple, Union
+from typing import Dict, Iterable, List, Tuple, Union
 from collections import defaultdict
+import asyncio
 
 from yapic import json
 
 from cryptofeed.connection import AsyncConnection, RestEndpoint, Routes, WebsocketEndpoint
-from cryptofeed.defines import ASK, BALANCES, BID, BITGET, BUY, CANCELLED, CANDLES, FILLED, L2_BOOK, LONG, OPEN, ORDER_INFO, PARTIAL, PERPETUAL, POSITIONS, SELL, SHORT, SPOT, TICKER, TRADES
+from cryptofeed.defines import ASK, BALANCES, BID, BITGET, BUY, CANCELLED, CANDLES, FILLED, L2_BOOK, LONG, OPEN, OPEN_INTEREST, ORDER_INFO, PARTIAL, FUNDING, PERPETUAL, POSITIONS, SELL, SHORT, SPOT, TICKER, TRADES
 from cryptofeed.exceptions import BadChecksum
 from cryptofeed.feed import Feed
 from cryptofeed.symbols import Symbol, str_to_symbol
-from cryptofeed.types import Ticker, Trade, Candle, OrderBook, Balance, Position, OrderInfo
+from cryptofeed.types import Ticker, Trade, Candle, OrderBook, Balance, Position, OrderInfo, OpenInterest, Funding
 from cryptofeed.util.time import timedelta_str_to_sec
 
 
@@ -34,18 +35,20 @@ class Bitget(Feed):
     ]
     rest_endpoints = [
         RestEndpoint('https://api.bitget.com', instrument_filter=('TYPE', (SPOT,)), routes=Routes('/api/spot/v1/public/products')),
-        RestEndpoint('https://api.bitget.com', instrument_filter=('TYPE', (PERPETUAL,)), routes=Routes(['/api/mix/v1/market/contracts?productType=umcbl', '/api/mix/v1/market/contracts?productType=dmcbl'])),
+        RestEndpoint('https://api.bitget.com', instrument_filter=('TYPE', (PERPETUAL,)), routes=Routes(['/api/mix/v1/market/contracts?productType=umcbl', '/api/mix/v1/market/contracts?productType=dmcbl'], open_interest='/api/mix/v1/market/open-interest?symbol={}', funding='/api/mix/v1/market/current-fundRate?symbol={}')),
     ]
 
     valid_candle_intervals = {'1m', '5m', '15m', '30m', '1h', '4h', '12h', '1d', '1w'}
     websocket_channels = {
         L2_BOOK: 'books',
-        TRADES: 'trade',
+        TRADES: 'tradeNew',
         TICKER: 'ticker',
         CANDLES: 'candle',
         ORDER_INFO: 'orders',
+        OPEN_INTEREST: 'open_interest',
         BALANCES: 'account',
-        POSITIONS: 'positions'
+        POSITIONS: 'positions',
+        FUNDING: 'funding',
     }
     request_limit = 20
 
@@ -99,6 +102,8 @@ class Bitget(Feed):
         return ret, info
 
     def __reset(self, conn: AsyncConnection):
+        self._funding_cache = {}
+        self._open_interest_cache = {}
         if self.std_channel_to_exchange(L2_BOOK) in conn.subscription:
             for pair in conn.subscription[self.std_channel_to_exchange(L2_BOOK)]:
                 std_pair = self.exchange_symbol_to_std_symbol(pair)
@@ -196,7 +201,10 @@ class Bitget(Feed):
         "action": "update"
         }
         """
+        
         for entry in msg['data']:
+            # print(entry)
+            # print(type(entry))
             t = Trade(
                 self.id,
                 symbol,
@@ -407,7 +415,76 @@ class Bitget(Feed):
                 raw=entry
             )
             await self.callback(POSITIONS, p, timestamp)
+            
+    async def _open_interest(self, pairs: Iterable):
+        """
+        {
+            "code":"00000",
+            "data":{
+                "symbol":"BTCUSDT_UMCBL",
+                "amount":"757.8338",
+                "timestamp":"1627292005913"
+            },
+            "msg":"success",
+            "requestTime":1627292005913
+        }
+        """
+        while True:
+            for pair in pairs:
+                # OI only for perp and futures, so check for / in pair name indicating spot
+                data = await self.http_conn.read(self.rest_endpoints[1].route('open_interest').format(pair))
+                received = time()
+                data = json.loads(data, parse_float=Decimal)
+                if 'data' in data:
+                    oi = data['data']['amount']
+                    if oi != self._open_interest_cache.get(pair, None):
+                        o = OpenInterest(
+                            self.id,
+                            pair,
+                            Decimal(oi),
+                            self.timestamp_normalize(int(data['data']['timestamp'])),
+                            raw=data
+                        )
+                        await self.callback(OPEN_INTEREST, o, received)
+                        self._open_interest_cache[pair] = oi
+                        await asyncio.sleep(1)
+            await asyncio.sleep(10)
 
+    async def _funding(self, pairs: Iterable):
+        """
+        {
+            "code":"00000",
+            "data":{
+                "symbol":"BTCUSDT_UMCBL",
+                "fundingRate":"0.0002"
+            },
+            "msg":"success",
+            "requestTime":1627291969594
+        }
+        """               
+        while True:
+            for pair in pairs:
+                # OI only for perp and futures, so check for / in pair name indicating spot
+                data = await self.http_conn.read(self.rest_endpoints[1].route('funding').format(pair))
+                received = time()
+                data = json.loads(data, parse_float=Decimal)
+                if 'data' in data:
+                    funding = data['data']['fundingRate']
+                    # print(f"funing_cache : {self._funding_cache.get(pair, None)}")
+                    if funding != self._funding_cache.get(pair, None):
+                        f = Funding(
+                            self.id,
+                            pair,
+                            None,
+                            Decimal(funding),
+                            None,
+                            self.timestamp_normalize(int(data['requestTime'])),
+                        )
+                        await self.callback(FUNDING, f, received)
+                        self._funding_cache[pair] = funding
+                        await asyncio.sleep(1)
+            await asyncio.sleep(10)
+            
     def _status(self, status: str) -> str:
         if status == 'new':
             return OPEN
@@ -546,7 +623,7 @@ class Bitget(Feed):
             await self._book(msg, timestamp, symbol)
         elif msg['arg']['channel'] == 'ticker':
             await self._ticker(msg, timestamp, symbol)
-        elif msg['arg']['channel'] == 'trade':
+        elif msg['arg']['channel'] == 'tradeNew':
             await self._tradeNew(msg, timestamp, symbol)
         elif msg['arg']['channel'].startswith('candle'):
             await self._candle(msg, timestamp, symbol)
@@ -586,30 +663,37 @@ class Bitget(Feed):
             interval = f"{interval[:-1]}{interval[-1].upper()}"
 
         for chan, symbols in conn.subscription.items():
-            for s in symbols:
-                sym = str_to_symbol(self.exchange_symbol_to_std_symbol(s))
-                if sym.type == SPOT:
-                    if chan == 'positions':  # positions not applicable on spot
-                        continue
-                    if self.is_authenticated_channel(self.exchange_channel_to_std(chan)):
-                        itype = 'spbl'
-                        s += '_SPBL'
-                    else:
-                        itype = 'SP'
-                else:
-                    if self.is_authenticated_channel(self.exchange_channel_to_std(chan)):
-                        itype = s.split('_')[-1]
-                        if chan == 'orders':
-                            s = 'default'  # currently only supports 'default' for order channel on futures
-                    else:
-                        itype = 'MC'
-                        s = s.split("_")[0]
+            if chan == OPEN_INTEREST:
+                asyncio.create_task(self._open_interest(symbols))
+                continue     
+            if chan == FUNDING:
+                asyncio.create_task(self._funding(symbols))
+                continue     
+            else:
+                for s in symbols:
+                    sym = str_to_symbol(self.exchange_symbol_to_std_symbol(s))
+                    if sym.type == SPOT:
+                        if chan == 'positions':  # positions not applicable on spot
+                            continue
+                        if self.is_authenticated_channel(self.exchange_channel_to_std(chan)):
+                            itype = 'spbl'
+                            s += '_SPBL'
+                        else:
+                            itype = 'SP'
+                    else:               
+                        if self.is_authenticated_channel(self.exchange_channel_to_std(chan)):
+                            itype = s.split('_')[-1]
+                            if chan == 'orders':
+                                s = 'default'  # currently only supports 'default' for order channel on futures
+                        else:
+                            itype = 'MC'
+                            s = s.split("_")[0]
 
-                d = {
-                    'instType': itype,
-                    'channel': chan if chan != 'candle' else 'candle' + interval,
-                    'instId': s
-                }
-                args.append(d)
+                    d = {
+                        'instType': itype,
+                        'channel': chan if chan != 'candle' else 'candle' + interval,
+                        'instId': s
+                    }
+                    args.append(d)
 
         await conn.write(json.dumps({"op": "subscribe", "args": args}))

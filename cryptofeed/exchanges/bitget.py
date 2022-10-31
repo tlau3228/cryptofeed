@@ -175,7 +175,40 @@ class Bitget(Feed):
                 raw=entry
             )
             await self.callback(TRADES, t, timestamp)
-
+            
+    async def _tradeNew(self, msg: dict, timestamp: float, symbol: str):
+        """
+        {
+        "data": [
+            {
+            "p": "20221.0",
+            "c": "0.249",
+            "ti": "969054896504102913",
+            "ty": "buy",
+            "ts": 1666766612172
+            }
+        ],
+        "arg": {
+            "instType": "mc",
+            "instId": "BTCUSDT",
+            "channel": "tradeNew"
+        },
+        "action": "update"
+        }
+        """
+        for entry in msg['data']:
+            t = Trade(
+                self.id,
+                symbol,
+                SELL if entry['ty'] == 'sell' else BUY,
+                Decimal(entry['c']),
+                Decimal(entry['p']),
+                self.timestamp_normalize(int(entry['ts'])),
+                id=entry['ti'],
+                raw=entry
+            )
+            await self.callback(TRADES, t, timestamp)
+            
     async def _candle(self, msg: dict, timestamp: float, symbol: str):
         '''
         {
@@ -514,7 +547,7 @@ class Bitget(Feed):
         elif msg['arg']['channel'] == 'ticker':
             await self._ticker(msg, timestamp, symbol)
         elif msg['arg']['channel'] == 'trade':
-            await self._trade(msg, timestamp, symbol)
+            await self._tradeNew(msg, timestamp, symbol)
         elif msg['arg']['channel'].startswith('candle'):
             await self._candle(msg, timestamp, symbol)
         elif msg['arg']['channel'].startswith('account'):

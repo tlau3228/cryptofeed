@@ -1,5 +1,5 @@
 from cryptofeed import FeedHandler
-from cryptofeed.exchanges import Coinbase, Bitget
+from cryptofeed.exchanges import Bitget
 from cryptofeed.defines import TRADES, TICKER
 
 

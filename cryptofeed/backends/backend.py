@@ -24,7 +24,7 @@ class BackendQueue:
             self.worker = Process(target=BackendQueue.worker, args=(self.writer,), daemon=True)
             self.worker.start()
         else:
-            self.queue = Queue()
+            self.queue = Queue(maxsize=10000)
             self.worker = loop.create_task(self.writer())
         self.started = True
 

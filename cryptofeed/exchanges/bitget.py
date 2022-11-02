@@ -13,6 +13,7 @@ from typing import Dict, Iterable, List, Tuple, Union
 from collections import defaultdict
 import asyncio
 
+
 from yapic import json
 
 from cryptofeed.connection import AsyncConnection, RestEndpoint, Routes, WebsocketEndpoint
@@ -110,7 +111,14 @@ class Bitget(Feed):
 
                 if std_pair in self._l2_book:
                     del self._l2_book[std_pair]
+                    
+    async def _keep_connection(self, conn):
+        while True:
+            await asyncio.sleep(25)        
+            await conn.write("ping")
+            print('sent ping')
 
+            
     async def _ticker(self, msg: dict, timestamp: float, symbol: str):
         """
         {
@@ -591,6 +599,10 @@ class Bitget(Feed):
             await self.callback(ORDER_INFO, o, timestamp)
 
     async def message_handler(self, msg: str, conn: AsyncConnection, timestamp: float):
+        
+        if msg == 'pong':
+            return
+        
         msg = json.loads(msg, parse_float=Decimal)
 
         if 'event' in msg:
@@ -652,10 +664,13 @@ class Bitget(Feed):
             }]
         }))
 
+
     async def subscribe(self, conn: AsyncConnection):
         if self.key_id and self.key_passphrase and self.key_secret:
             await self._login(conn)
         self.__reset(conn)
+        asyncio.create_task(self._keep_connection(conn))
+
         args = []
 
         interval = self.candle_interval

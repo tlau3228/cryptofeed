@@ -6,6 +6,7 @@ associated with this software.
 '''
 from collections import defaultdict
 from datetime import datetime as dt
+import time
 from typing import Tuple
 
 import asyncpg
@@ -50,7 +51,7 @@ class PostgresCallback(BackendQueue):
 
     async def _connect(self):
         if self.conn is None:
-            self.conn = await asyncpg.connect(user=self.user, password=self.pw, database=self.db, host=self.host, port=self.port)
+            self.conn = await asyncpg.connect(user=self.user, password=self.pw, database=self.db, host=self.host)
 
     def format(self, data: Tuple):
         feed = data[0]
@@ -88,19 +89,22 @@ class PostgresCallback(BackendQueue):
                         ts = dt.utcfromtimestamp(data['timestamp']) if data['timestamp'] else None
                         rts = dt.utcfromtimestamp(data['receipt_timestamp'])
                         batch.append((data['exchange'], data['symbol'], ts, rts, data))
+                    start_time = time.monotonic()
                     await self.write_batch(batch)
+                    # print('time: ', time.monotonic() - start_time)
+
 
     async def write_batch(self, updates: list):
         await self._connect()
         args_str = ','.join([self.format(u) for u in updates])
-
+        # print(f"updates: {updates}")
         async with self.conn.transaction():
             try:
                 if self.custom_columns:
                     await self.conn.execute(self.insert_statement + args_str)
                 else:
                     await self.conn.execute(f"INSERT INTO {self.table} VALUES {args_str}")
-
+                    # look into copy_records_to_table as a faster alternative
             except asyncpg.UniqueViolationError:
                 # when restarting a subscription, some exchanges will re-publish a few messages
                 pass
@@ -113,6 +117,7 @@ class TradePostgres(PostgresCallback, BackendCallback):
         if self.custom_columns:
             return self._custom_format(data)
         else:
+            # print(data)
             exchange, symbol, timestamp, receipt, data = data
             id = f"'{data['id']}'" if data['id'] else 'NULL'
             otype = f"'{data['type']}'" if data['type'] else 'NULL'
@@ -130,7 +135,9 @@ class FundingPostgres(PostgresCallback, BackendCallback):
         else:
             exchange, symbol, timestamp, receipt, data = data
             ts = dt.utcfromtimestamp(data['next_funding_time']) if data['next_funding_time'] else 'NULL'
-            return f"(DEFAULT,'{timestamp}','{receipt}','{exchange}','{symbol}',{data['mark_price'] if data['mark_price'] else 'NULL'},{data['rate']},'{ts}',{data['predicted_rate']})"
+            mark_price = data['mark_price'] if data['mark_price'] else 'NULL'
+            predicted_rate = data['predicted_rate']  if data['predicted_rate'] else 'NULL'
+            return f"(DEFAULT,'{timestamp}','{receipt}','{exchange}','{symbol}',{mark_price},{data['rate']},'{ts}',{predicted_rate})"
 
 
 class TickerPostgres(PostgresCallback, BackendCallback):
@@ -152,7 +159,8 @@ class OpenInterestPostgres(PostgresCallback, BackendCallback):
             return self._custom_format(data)
         else:
             exchange, symbol, timestamp, receipt, data = data
-            return f"(DEFAULT,'{timestamp}','{receipt}','{exchange}','{symbol}',{data['open_interest']})"
+            open_interest = data['open_interest']  if data['open_interest'] else 'NULL'
+            return f"(DEFAULT,'{timestamp}','{receipt}','{exchange}','{symbol}',{open_interest})"
 
 
 class IndexPostgres(PostgresCallback, BackendCallback):

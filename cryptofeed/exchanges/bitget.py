@@ -116,8 +116,6 @@ class Bitget(Feed):
         while True:
             await asyncio.sleep(25)        
             await conn.write("ping")
-            print('sent ping')
-
             
     async def _ticker(self, msg: dict, timestamp: float, symbol: str):
         """
